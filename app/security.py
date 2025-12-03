@@ -3,6 +3,7 @@ from typing import Optional
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+import random
 
 from .config import settings
 from .schemas import TokenData
@@ -43,3 +44,25 @@ def decode_access_token(token: str)-> TokenData:
     except JWTError:
         return TokenData()
     
+
+
+
+# -------- OTP-specific helpers --------
+
+def generate_otp_code(length: int = 6) -> str:
+    """Generate a numeric OTP code like '483920'."""
+    min_val = 10 ** (length - 1)
+    max_val = (10 ** length) - 1
+    return str(random.randint(min_val, max_val))
+
+
+def hash_otp(code: str) -> str:
+    return pwd_context.hash(code)
+
+
+def verify_otp(code: str, hashed: str) -> bool:
+    return pwd_context.verify(code, hashed)
+
+
+def otp_expires_in(minutes: int = 5) -> datetime:
+    return datetime.now(timezone.utc) + timedelta(minutes=minutes)

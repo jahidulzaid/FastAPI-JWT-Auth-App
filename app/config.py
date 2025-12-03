@@ -9,6 +9,15 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
+
+        # EMAIL (Gmail SMTP example)
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = "jahidul.cse.gub@gmail.com"
+    SMTP_PASSWORD: str = "your_app_password"  # use Gmail App Password, NOT your real password
+    EMAIL_FROM: str = "no-reply@ijahidul.com"  # or use same as SMTP_USER
+
+
     class Config:
         env_file = ".env"
 

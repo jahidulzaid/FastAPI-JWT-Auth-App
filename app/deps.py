@@ -3,7 +3,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import User
+from .models import User, OTPCode
 from .security import decode_access_token
 
 
