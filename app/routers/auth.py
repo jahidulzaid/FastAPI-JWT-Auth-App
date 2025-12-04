@@ -9,6 +9,13 @@ from .. import models, schemas, security
 from ..deps import get_db
 from ..email_utils import send_email
 
+
+def get_current_utc_time():
+    """Get current UTC time, handling both timezone-aware and naive datetimes."""
+    now = datetime.now(timezone.utc)
+    # Return timezone-naive for SQLite compatibility
+    return now.replace(tzinfo=None)
+
 router = APIRouter(
     prefix="/auth",
     tags=["auth"],
@@ -88,56 +95,130 @@ def signup(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
 
 @router.post("/signup/verify")
 def signup_verify(body: schemas.SignupOTPVerify, db: Session = Depends(get_db)):
-    otp = db.query(models.OTPCode).filter(models.OTPCode.id == body.otp_id).first()
+    try:
+        otp = db.query(models.OTPCode).filter(models.OTPCode.id == body.otp_id).first()
 
-    if not otp or otp.purpose != "signup":
+        if not otp or otp.purpose != "signup":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OTP request",
+            )
+
+        if otp.is_used:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="OTP already used",
+            )
+
+        # Handle both timezone-aware and naive datetimes
+        current_time = get_current_utc_time()
+        expires_time = otp.expires_at.replace(tzinfo=None) if otp.expires_at.tzinfo else otp.expires_at
+        if expires_time < current_time:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="OTP expired",
+            )
+
+        if not security.verify_otp(body.otp_code, otp.code_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OTP code",
+            )
+
+        # Mark OTP used and activate user
+        otp.is_used = True
+        user = db.query(models.User).filter(models.User.id == otp.user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User not found for this OTP",
+            )
+
+        user.is_active = True
+        db.add(otp)
+        db.add(user)
+        db.commit()
+
+        return {"detail": "Signup verified, account activated."}
+    except Exception as e:
+        db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid OTP request",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}",
         )
 
-    if otp.is_used:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OTP already used",
-        )
 
-    if otp.expires_at < datetime.now(timezone.utc):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OTP expired",
-        )
+@router.post("/signup/resend-otp", response_model=schemas.ResendOTPResponse)
+def resend_signup_otp(body: schemas.ResendOTPRequest, db: Session = Depends(get_db)):
+    """
+    Resend signup OTP for users who already signed up but haven't verified.
+    Only works if the account is not yet activated.
+    """
+    user = db.query(models.User).filter(models.User.email == body.email).first()
 
-    if not security.verify_otp(body.otp_code, otp.code_hash):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid OTP code",
-        )
-
-    # Mark OTP used and activate user
-    otp.is_used = True
-    user = db.query(models.User).filter(models.User.id == otp.user_id).first()
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User not found for this OTP",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No account found with this email",
         )
 
-    user.is_active = True
+    if user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Account is already activated. Please login instead.",
+        )
+
+    # Mark any existing unused signup OTPs as used (to prevent clutter)
+    existing_otps = (
+        db.query(models.OTPCode)
+        .filter(
+            models.OTPCode.user_id == user.id,
+            models.OTPCode.purpose == "signup",
+            models.OTPCode.is_used == False,
+        )
+        .all()
+    )
+    for old_otp in existing_otps:
+        old_otp.is_used = True
+        db.add(old_otp)
+
+    # Generate new OTP
+    otp_code = security.generate_otp_code()
+    otp_hash = security.hash_otp(otp_code)
+    expires_at = security.otp_expires_in(minutes=10)
+
+    otp = models.OTPCode(
+        user_id=user.id,
+        code_hash=otp_hash,
+        purpose="signup",
+        expires_at=expires_at,
+    )
     db.add(otp)
-    db.add(user)
     db.commit()
+    db.refresh(otp)
 
-    return {"detail": "Signup verified, account activated."}
+    # Send new OTP to email
+    subject = "Your New Signup OTP Code"
+    body_text = f"Hello {user.name},\n\nYour new signup OTP code is: {otp_code}\n\nIt will expire in 10 minutes."
+    send_email(user.email, subject, body_text)
+
+    return schemas.ResendOTPResponse(
+        otp_id=otp.id,
+        detail="New signup OTP sent to your email",
+    )
 
 
-# -------- LOGIN with EMAIL OTP --------
+# -------- LOGIN (Simple Email/Password) --------
 
-@router.post("/login/start", response_model=schemas.LoginOTPStartResponse)
-def login_start(
-    body: schemas.LoginOTPStart,
+@router.post("/login", response_model=schemas.Token)
+def login(
+    body: schemas.UserLogin,
     db: Session = Depends(get_db),
 ):
+    """
+    Simple email/password login. Returns JWT access token immediately.
+    No OTP required for login - OTP is only used for email verification during signup.
+    """
     user = db.query(models.User).filter(models.User.email == body.email).first()
 
     if not user or not security.verify_password(body.password, user.hashed_password):
@@ -149,72 +230,9 @@ def login_start(
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account not activated",
+            detail="Account not activated. Please verify your email with the OTP sent during signup.",
         )
-
-    otp_code = security.generate_otp_code()
-    otp_hash = security.hash_otp(otp_code)
-    expires_at = security.otp_expires_in(minutes=5)
-
-    otp = models.OTPCode(
-        user_id=user.id,
-        code_hash=otp_hash,
-        purpose="login",
-        expires_at=expires_at,
-    )
-    db.add(otp)
-    db.commit()
-    db.refresh(otp)
-
-    subject = "Your Login OTP Code"
-    body_text = f"Hello {user.name},\n\nYour login OTP code is: {otp_code}\n\nIt will expire in 5 minutes."
-    send_email(user.email, subject, body_text)
-
-    return schemas.LoginOTPStartResponse(
-        otp_id=otp.id,
-        detail="Login OTP sent to your email",
-    )
-
-
-@router.post("/login/verify", response_model=schemas.Token)
-def login_verify(body: schemas.LoginOTPVerify, db: Session = Depends(get_db)):
-    otp = db.query(models.OTPCode).filter(models.OTPCode.id == body.otp_id).first()
-
-    if not otp or otp.purpose != "login":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid OTP request",
-        )
-
-    if otp.is_used:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OTP already used",
-        )
-
-    if otp.expires_at < datetime.now(timezone.utc):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OTP expired",
-        )
-
-    if not security.verify_otp(body.otp_code, otp.code_hash):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid OTP code",
-        )
-
-    user = db.query(models.User).filter(models.User.id == otp.user_id).first()
-    if not user or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive",
-        )
-
-    otp.is_used = True
-    db.add(otp)
 
     access_token = security.create_access_token(data={"sub": str(user.id)})
-    db.commit()
 
     return {"access_token": access_token, "token_type": "bearer"}

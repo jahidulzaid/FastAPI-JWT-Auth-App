@@ -3,9 +3,9 @@ from typing import Optional
 from pydantic import BaseModel, EmailStr, Field
 
 class UserBase(BaseModel):
-    name: str = Field(..., example="John Doe", max_length=150)
+    name: str = Field(..., example="Jahidul Islam", max_length=150)
     email: EmailStr
-    phone: str = Field(..., example="+1234567890", max_length=20)
+    phone: str = Field(..., example="+8801886433466", max_length=20)
     role: Optional[str] = Field(default="user", max_length=50)
 
 class UserCreate(UserBase):
@@ -59,3 +59,12 @@ class LoginOTPStartResponse(BaseModel):
 class LoginOTPVerify(BaseModel):
     otp_id: int
     otp_code: str = Field(..., min_length=6, max_length=6)
+
+
+class ResendOTPRequest(BaseModel):
+    email: EmailStr
+
+
+class ResendOTPResponse(BaseModel):
+    otp_id: int
+    detail: str = "New OTP sent to your email"

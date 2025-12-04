@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "FastAPI JWT Auth"
-    DATABASE_URL: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/mydb"
+    DATABASE_URL: str = "sqlite:///./fastapi_jwt_auth.db"
     JWT_SECRET_KEY: str = "change-this-in-env"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
@@ -20,6 +20,5 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
-
 
 settings = Settings()
